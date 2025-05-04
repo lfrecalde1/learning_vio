@@ -49,6 +49,7 @@ def compute_loss(pred, gt):
 
     # Normalize predicted quaternion
     quat_pred = quat_pred / quat_pred.norm(dim=1, keepdim=True)
+    quat_gt = quat_gt / quat_gt.norm(dim=1, keepdim=True)
 
     # Position loss (MSE)
     pos_loss = F.mse_loss(pos_pred, pos_gt)
@@ -68,7 +69,7 @@ def compute_loss(pred, gt):
     # Squared norm (theta^2), averaged over the batch
     quat_loss = q_log.pow(2).sum(dim=1).mean()
 
-    total_loss = pos_loss + quat_loss + vel_loss
+    total_loss = 10*pos_loss + quat_loss + 5*vel_loss
 
     return total_loss, pos_loss, quat_loss
 
@@ -141,8 +142,8 @@ def main():
     writer = SummaryWriter(log_dir=os.path.join(log_dir, "runs"))
 
     # ----- Data -----
-    train_dataset = IMUDatasetFromMat("liss.mat")
-    val_dataset = IMUDatasetFromMat("liss.mat")
+    train_dataset = IMUDatasetFromMat("circle.mat")
+    val_dataset = IMUDatasetFromMat("circle.mat")
 
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=4, pin_memory=True)
     val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=True, num_workers=4, pin_memory=True)
@@ -150,7 +151,7 @@ def main():
     # ----- Model -----
     model = PoseNet(
         input_dim=12,
-        output_dim=9,
+        output_dim=10,
         hidden_dim=args.hidden_dim,
         dropout=args.dropout,
         num_layers=args.num_layers

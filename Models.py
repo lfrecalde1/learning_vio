@@ -64,7 +64,7 @@ class IMUNet(nn.Module):
         return out
 
 class PoseNet(nn.Module):
-    def __init__(self, input_dim=12, output_dim=7, hidden_dim=256, dropout=0.2, num_layers=2, num_frequencies=20):
+    def __init__(self, input_dim=12, output_dim=10, hidden_dim=256, dropout=0.2, num_layers=2, num_frequencies=20):
         super(PoseNet, self).__init__()
         self.net = IMUNet(
             input_dim=input_dim,
@@ -80,7 +80,7 @@ class PoseNet(nn.Module):
 
         # Scale velocity appropriately
         velocity_scale = 10.0  # Choose based on your dataset
-        position_scale = 4
+        position_scale = 10.0
         pos = position_scale * torch.tanh(x[:, :3])
         velocity = velocity_scale * torch.tanh(x[:, 6:])
 

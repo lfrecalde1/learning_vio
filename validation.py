@@ -20,7 +20,7 @@ def quat_to_rot(q):
 
 # ------------ LOAD DATASET AND MODEL ----------------------
 
-data = loadmat("liss.mat")
+data = loadmat("circle.mat")
 imu_window = data['imu_window']  # (6, window_length, N)
 x = data['x']  # (13, N)
 

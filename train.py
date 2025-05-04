@@ -81,12 +81,13 @@ def train_one_epoch(model, loader, optimizer, quat_weight):
     pos_total_loss = 0.0
     quat_total_loss = 0.0
 
-    for imu_tensor, gt in tqdm(loader, desc="Training"):
+    for imu_tensor, img_tensor, gt in tqdm(loader):
         imu_tensor = imu_tensor.to(DEVICE)
+        img_tensor = img_tensor.to(DEVICE)
         gt = gt.to(DEVICE)
 
         optimizer.zero_grad()
-        pred = model(imu_tensor)
+        pred = model(imu_tensor, img_tensor)
         loss, pos_loss, quat_loss = compute_loss(pred, gt)
         loss.backward()
         optimizer.step()
@@ -105,11 +106,12 @@ def validate(model, loader, quat_weight):
     quat_total_loss = 0.0
 
     with torch.no_grad():
-        for imu_tensor, gt in tqdm(loader, desc="Validation"):
+        for imu_tensor, img_tensor, gt in tqdm(loader):
             imu_tensor = imu_tensor.to(DEVICE)
+            img_tensor = img_tensor.to(DEVICE)
             gt = gt.to(DEVICE)
 
-            pred = model(imu_tensor)
+            pred = model(imu_tensor, img_tensor)
             loss, pos_loss, quat_loss = compute_loss(pred, gt)
 
             total_loss += loss.item()
@@ -142,12 +144,16 @@ def main():
     writer = SummaryWriter(log_dir=os.path.join(log_dir, "runs"))
 
     # ----- Data -----
-    train_dataset = IMUDatasetFromMat("circle.mat")
-    val_dataset = IMUDatasetFromMat("circle.mat")
+    train_dataset = IMUImageDataset("liss.mat", "./liss/saved_images")
+    val_dataset = IMUImageDataset("liss.mat", "./liss/saved_images")
+
+    imu_tensor, img_tensor, gt= train_dataset.__getitem__(0)
+    print("hola")
+    print(img_tensor.shape)
 
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=4, pin_memory=True)
     val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=True, num_workers=4, pin_memory=True)
-
+#
     # ----- Model -----
     model = PoseNet(
         input_dim=12,
@@ -156,21 +162,21 @@ def main():
         dropout=args.dropout,
         num_layers=args.num_layers
     ).to(DEVICE)
-
+#
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
-
+#
     best_val_loss = float("inf")
-
+#
     # ----- Training Loop -----
     for epoch in range(args.num_epochs):
         print(f"\nEpoch {epoch+1}/{args.num_epochs}")
-
+#
         train_loss, train_pos_loss, train_quat_loss = train_one_epoch(model, train_loader, optimizer, args.quat_weight)
         val_loss, val_pos_loss, val_quat_loss = validate(model, val_loader, args.quat_weight)
-
+#
         print(f"Train Pos Loss: {train_pos_loss:.4f} | Train Quat Loss: {train_quat_loss:.4f}")
         print(f"Val   Pos Loss: {val_pos_loss:.4f} | Val   Quat Loss: {val_quat_loss:.4f}")
-
+#
         # ---- TensorBoard logging ----
         writer.add_scalar("Loss/Train_Total", train_loss, epoch)
         writer.add_scalar("Loss/Train_Position", train_pos_loss, epoch)
@@ -178,15 +184,15 @@ def main():
         writer.add_scalar("Loss/Validation_Total", val_loss, epoch)
         writer.add_scalar("Loss/Validation_Position", val_pos_loss, epoch)
         writer.add_scalar("Loss/Validation_Quaternion", val_quat_loss, epoch)
-
+#
         # ---- Save best model ----
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             best_model_path = os.path.join(ckpt_path, "best_model.pth")
             torch.save(model.state_dict(), best_model_path)
             print(f"Best model saved with val loss {best_val_loss:.4f}")
-
+#
     writer.close()
-
+#
 if __name__ == "__main__":
     main()

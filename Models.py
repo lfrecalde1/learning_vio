@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torchvision.models as models
 
 class FourierLifting(nn.Module):
     def __init__(self, input_dim, num_frequencies=20):
@@ -62,28 +63,57 @@ class IMUNet(nn.Module):
         out = self.relu(self.fc2(out))
         out = self.out_layer(out)
         return out
+import torchvision.models as models
 
 class PoseNet(nn.Module):
-    def __init__(self, input_dim=12, output_dim=10, hidden_dim=256, dropout=0.2, num_layers=2, num_frequencies=20):
+    def __init__(self, input_dim=12, output_dim=9, hidden_dim=256, dropout=0.2, num_layers=2, num_frequencies=50):
         super(PoseNet, self).__init__()
+
+        # --- IMU network ---
         self.net = IMUNet(
             input_dim=input_dim,
-            output_dim=9,  # 3 pos + 3 stereographic vector
+            output_dim=hidden_dim * 2,  # Instead of final prediction, output feature vector
             hidden_dim=hidden_dim,
             num_layers=num_layers,
             dropout_rate=dropout,
             num_frequencies=num_frequencies
         )
 
-    def forward(self, x):
-        x = self.net(x)
+        # --- Image encoder ---
+        resnet = models.resnet18(pretrained=True)
+        resnet.fc = nn.Identity()  # Remove classification layer
+        self.image_encoder = resnet  # Output: 512-dim feature vector
 
-        # Scale velocity appropriately
-        velocity_scale = 10.0  # Choose based on your dataset
-        position_scale = 10.0
-        pos = position_scale * torch.tanh(x[:, :3])
-        velocity = velocity_scale * torch.tanh(x[:, 6:])
+        # --- Fusion ---
+        self.fc_fuse = nn.Sequential(
+            nn.Linear(hidden_dim * 2 + 512, 256),
+            nn.ReLU(),
+            nn.Linear(256, output_dim)  # output_dim = 9: pos(3), stereo_vec(3), vel(3)
+        )
 
-        stereo_vec = x[:, 3:6]
+    def forward(self, imu_input, img_input):
+        """
+        imu_input: (batch, window, 12)
+        img_input: (batch, 3, H, W)
+        """
+        # ---- IMU feature ----
+        lifted = self.net.lifting(imu_input)
+        lstm_out, _ = self.net.lstm1(lifted)
+        lstm_out2, _ = self.net.lstm2(lstm_out)
+        imu_feat = lstm_out2[:, -1, :]  # Last time step output
+
+        # ---- Image feature ----
+        img_feat = self.image_encoder(img_input)  # Shape: (batch, 512)
+
+        # ---- Fuse ----
+        fused = torch.cat([imu_feat, img_feat], dim=1)
+        out = self.fc_fuse(fused)
+
+        # ---- Parse outputs ----
+        pos = 10.0 * torch.tanh(out[:, :3])  # Position (bounded)
+        stereo_vec = out[:, 3:6]
+        vel = 10.0 * torch.tanh(out[:, 6:9])  # Velocity (bounded)
+
         q = stereographic_projection_to_quaternion(stereo_vec)
-        return torch.cat([pos, q, velocity], dim=1)  # Final output: (batch_size, 7) 
+
+        return torch.cat([pos, q, vel], dim=1)

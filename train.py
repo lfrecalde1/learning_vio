@@ -43,36 +43,28 @@ def quaternion_log(q):
     q_log = theta * q_v / q_v_norm
     return q_log
 
-def compute_loss(pred, gt):
+def compute_loss(pred, gt, w_pos=10.0, w_quat=1.0, w_vel=5.0):
     pos_pred, quat_pred, vel_pred = pred[:, :3], pred[:, 3:7], pred[:, 7:10]
     pos_gt, quat_gt, vel_gt = gt[:, :3], gt[:, 3:7], gt[:, 7:10]
 
-    # Normalize predicted quaternion
     quat_pred = quat_pred / quat_pred.norm(dim=1, keepdim=True)
     quat_gt = quat_gt / quat_gt.norm(dim=1, keepdim=True)
 
-    # Position loss (MSE)
     pos_loss = F.mse_loss(pos_pred, pos_gt)
     vel_loss = F.mse_loss(vel_pred, vel_gt)
 
-    # Quaternion loss (log map in tangent space)
-
-    # Inverse of predicted quaternion
     quat_pred_inv = torch.cat((quat_pred[:, 0:1], -quat_pred[:, 1:]), dim=1)
-
-    # Quaternion error: q_err = q_gt * q_pred^{-1}
     q_err = quaternion_product(quat_gt, quat_pred_inv)
-
-    # Log map to tangent space
     q_log = quaternion_log(q_err)
-
-    # Squared norm (theta^2), averaged over the batch
     quat_loss = q_log.pow(2).sum(dim=1).mean()
 
-    total_loss = 10*pos_loss + quat_loss + 5*vel_loss
+    total_loss = (
+        w_pos * pos_loss
+        + w_quat * quat_loss
+        + w_vel * vel_loss
+    )
 
     return total_loss, pos_loss, quat_loss
-
 # --------------------- Training ---------------------------
 
 def train_one_epoch(model, loader, optimizer, quat_weight):
@@ -127,7 +119,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--log_dir", default="IO/", help="Log Directory")
     parser.add_argument("--batch_size", type=int, default=32)
-    parser.add_argument("--num_epochs", type=int, default=100)
+    parser.add_argument("--num_epochs", type=int, default=40)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--hidden_dim", type=int, default=256)
     parser.add_argument("--dropout", type=float, default=0.2)
@@ -144,8 +136,8 @@ def main():
     writer = SummaryWriter(log_dir=os.path.join(log_dir, "runs"))
 
     # ----- Data -----
-    train_dataset = IMUImageDataset("liss.mat", "./liss/saved_images")
-    val_dataset = IMUImageDataset("liss.mat", "./liss/saved_images")
+    train_dataset = IMUImagePairDataset("liss.mat", "./liss/saved_images")
+    val_dataset = IMUImagePairDataset("liss.mat", "./liss/saved_images")
 
     imu_tensor, img_tensor, gt= train_dataset.__getitem__(0)
     print("hola")

@@ -1,7 +1,6 @@
 import os
 import numpy as np
 import torch
-from torch.utils.data import DataLoader
 import matplotlib.pyplot as plt
 from Models import *
 from utils import *
@@ -10,22 +9,7 @@ from scipy.io import loadmat
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-def quaternion_conjugate_torch(q):
-    q_conj = q.clone()
-    q_conj[..., 1:4] *= -1
-    return q_conj
-
-def quaternion_multiply_torch(q1, q2):
-    w1, x1, y1, z1 = q1.unbind(-1)
-    w2, x2, y2, z2 = q2.unbind(-1)
-    w = w1*w2 - x1*x2 - y1*y2 - z1*z2
-    x = w1*x2 + x1*w2 + y1*z2 - z1*y2
-    y = w1*y2 - x1*z2 + y1*w2 + z1*x2
-    z = w1*z2 + x1*y2 - y1*x2 + z1*w2
-    return torch.stack([w, x, y, z], dim=-1)
-
 def quat_to_rot(q):
-    """Rotation matrix from quaternion [w, x, y, z]"""
     q0, q1, q2, q3 = q
     R = np.array([
         [q0**2 + q1**2 - q2**2 - q3**2, 2*(q1*q2 - q0*q3),     2*(q1*q3 + q0*q2)],
@@ -36,96 +20,86 @@ def quat_to_rot(q):
 
 # ------------ LOAD DATASET AND MODEL ----------------------
 
-val_dataset = IMUDatasetFromMat("trajectories_3.mat")
-val_loader = DataLoader(val_dataset, batch_size=1, shuffle=False, num_workers=0, pin_memory=True)
+data = loadmat("liss.mat")
+imu_window = data['imu_window']  # (6, window_length, N)
+x = data['x']  # (13, N)
+
+print("imu_window shape:", imu_window.shape)
+print("x shape:", x.shape)
 
 model = PoseNet(
-    input_dim=6,
-    output_dim=7,
+    input_dim=12,
+    output_dim=9,
     hidden_dim=256,
     dropout=0.2,
     num_layers=2
 ).to(DEVICE)
 
-# Load the best trained weights
 ckpt_path = '/home/fer/Lectures/computer_vision/Learning_vio/ckpts/best_model.pth'
 model.load_state_dict(torch.load(ckpt_path))
 model.eval()
 
-# Load Data Validation
-data = loadmat("trajectories_3.mat")
-imu_window = data['imu_window']  # (6, 10, N)
-x = data['x']  # (12, N)
+# ------------ INITIALIZE ----------------------
 
-print(imu_window.shape)
-print(x.shape)
+dt = 0.01667
+N = imu_window.shape[2]  # number of time steps
+window_length = imu_window.shape[1]  # number of IMU timesteps (10 or 30 depending on your data!)
 
-# ------------ RUN VALIDATION ----------------------
+pos_predictions = np.zeros((3, N))
+vel_predictions = np.zeros((3, N))
+quat_predictions = np.zeros((4, N))
 
-all_pos_pred = []
-all_pos_gt = []
-all_quat_pred = []
-all_quat_gt = []
+# Initial conditions
+pos_predictions[:, 0] = x[0:3, 0]
+vel_predictions[:, 0] = x[3:6, 0]
+quat_predictions[:, 0] = x[6:10, 0]
 
+imu_seq_k = imu_window[:, :, 0].T  # shape (window_length, 6)
 
-estimation_positions = np.zeros((3, x.shape[1]))
-estimation_positions[:, 0] = x[3:6, 0]
+# ------------ RECURSIVE PREDICTION ----------------------
 
-gt_positions = x[3:6, :]
-k = 0
+for k in tqdm(range(N - 1), desc="Recursive Prediction"):
 
-dt = 0.01667  # time step
+    pos_k = pos_predictions[:, k]
+    vel_k = vel_predictions[:, k]
 
-def position_derivative(position, delta, R):
-    return R @ delta
-with torch.no_grad():
-    for imu_tensor, gt in tqdm(val_loader, desc="Running Validation"):
-        imu_tensor = imu_tensor.to(DEVICE)
-        gt = gt.to(DEVICE)
+    pos_vel = np.hstack([pos_k, vel_k])  # (6, )
 
-        pred = model(imu_tensor)
+    # Repeat to match imu_input
+    pos_vel_repeated = np.tile(pos_vel, (window_length, 1))  # shape (window_length, 6)
 
-        pos_pred, quat_pred = pred[:, :3], pred[:, 3:]
-        pos_gt, quat_gt = gt[:, :3], gt[:, 3:]
+    imu_input = imu_seq_k  # shape (window_length, 6)
 
-        quat_pred = quat_pred / quat_pred.norm(dim=1, keepdim=True)
+    net_input = np.concatenate([imu_input, pos_vel_repeated], axis=1)  # shape (window_length, 12)
 
-        all_pos_pred.append(pos_pred.cpu().numpy())
-        all_pos_gt.append(pos_gt.cpu().numpy())
-        all_quat_pred.append(quat_pred.cpu().numpy())
-        all_quat_gt.append(quat_gt.cpu().numpy())
+    net_input_torch = torch.tensor(net_input, dtype=torch.float32).unsqueeze(0).to(DEVICE)
 
-        delta_pos = pos_pred.cpu().numpy().reshape((3,))
-        q_pred = quat_pred.cpu().numpy().reshape((4,))
-        q_gt = quat_gt.cpu().numpy().reshape((4,))
-        R = quat_to_rot(q_gt)
+    with torch.no_grad():
+        pred = model(net_input_torch)
 
-        p0 = estimation_positions[:, k]  # current position
+    pos_pred = pred[0, :3].cpu().numpy()
+    quat_pred = pred[0, 3:7].cpu().numpy()
+    vel_pred = pred[0, 7:].cpu().numpy()
 
-        # RK4 integration
-        k1 = position_derivative(p0, delta_pos, R)
-        k2 = position_derivative(p0 + 0.5 * dt * k1, delta_pos, R)
-        k3 = position_derivative(p0 + 0.5 * dt * k2, delta_pos, R)
-        k4 = position_derivative(p0 + dt * k3, delta_pos, R)
+    quat_pred /= np.linalg.norm(quat_pred)
 
-        dp = (dt / 6.0) * (k1 + 2 * k2 + 2 * k3 + k4)
-        estimation_positions[:, k+1] = p0 + dp
+    pos_predictions[:, k+1] = pos_pred
+    vel_predictions[:, k+1] = vel_pred
+    quat_predictions[:, k+1] = quat_pred
 
-        k += 1
-
-# Stack everything to shape (N, 3) or (N, 4)
-all_pos_pred = np.vstack(all_pos_pred)
-all_pos_gt = np.vstack(all_pos_gt)
-all_quat_pred = np.vstack(all_quat_pred)
-all_quat_gt = np.vstack(all_quat_gt)
+    # Update IMU window for next step
+    if k < N - 2:
+        imu_seq_k = imu_window[:, :, k+1].T  # shape (window_length, 6)
 
 # ------------ PLOTTING ----------------------
+gt_positions = x[0:3, :]
+gt_quaternions = x[6:10, :]
 
-# Position plot
+# ----- Position Plot -----
 plt.figure(figsize=(12, 8))
 for i, label in enumerate(['X', 'Y', 'Z']):
-    plt.plot(all_pos_gt[:, i], label=f'GT {label}')
-    plt.plot(all_pos_pred[:, i], '--', label=f'Pred {label}')
+    plt.plot(gt_positions[i, :], label=f'GT {label}')
+    plt.plot(pos_predictions[i, :], '--', label=f'Pred {label}')
 plt.title('Position Comparison')
 plt.xlabel('Sample index')
 plt.ylabel('Position (m)')
@@ -133,11 +107,11 @@ plt.legend()
 plt.grid()
 plt.show()
 
-# Quaternion plot
+# ----- Quaternion Plot -----
 plt.figure(figsize=(12, 8))
 for i, label in enumerate(['w', 'x', 'y', 'z']):
-    plt.plot(all_quat_gt[:, i], label=f'GT {label}')
-    plt.plot(all_quat_pred[:, i], '--', label=f'Pred {label}')
+    plt.plot(gt_quaternions[i, :], label=f'GT {label}')
+    plt.plot(quat_predictions[i, :], '--', label=f'Pred {label}')
 plt.title('Quaternion Comparison')
 plt.xlabel('Sample index')
 plt.ylabel('Quaternion component')
@@ -145,22 +119,22 @@ plt.legend()
 plt.grid()
 plt.show()
 
-# ------------ PLOTTING TRAJECTORIES ----------------------
+# ----- Trajectory Plot -----
+plt.figure(figsize=(10, 8))
+plt.plot(gt_positions[0, :], gt_positions[1, :], label='Ground Truth', color='blue')
+plt.plot(pos_predictions[0, :], pos_predictions[1, :], '--', label='Predicted', color='red')
 
-fig = plt.figure(figsize=(10, 8))
-ax = fig.add_subplot(111)
+# Plot initial points as markers
+plt.plot(gt_positions[0, 0], gt_positions[1, 0], 'o', color='blue', markersize=10, label='GT Start')
+plt.plot(pos_predictions[0, 0], pos_predictions[1, 0], 'o', color='red', markersize=10, label='Pred Start')
 
-# Ground truth trajectory
-ax.plot(gt_positions[0, :], gt_positions[1, :], label='Ground Truth', color='blue')
+plt.xlabel('X (m)')
+plt.ylabel('Y (m)')
+plt.title('Trajectory Comparison')
 
-# Estimated trajectory
-ax.plot(estimation_positions[0, :], estimation_positions[1, :], 
-        label='Estimated', color='red', linestyle='--')
+plt.xlim([-3, 3])
+plt.ylim([-3, 3])
 
-ax.set_xlabel('X (m)')
-ax.set_ylabel('Y (m)')
-ax.set_title('3D Trajectory Comparison')
-ax.legend()
+plt.legend()
 plt.grid(True)
-plt.tight_layout()
 plt.show()

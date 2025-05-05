@@ -132,8 +132,9 @@ def main():
     parser.add_argument("--quat_weight", type=float, default=1.0)  # Weight for quaternion loss
     args = parser.parse_args()
 
-    log_dir = os.path.join('/home/fer/Lectures/computer_vision/Learning_vio/', args.log_dir)
-    ckpt_path = '/home/fer/Lectures/computer_vision/Learning_vio/ckpts'
+    BASE = os.getcwd()
+    log_dir = os.path.join(BASE, args.log_dir)
+    ckpt_path = os.path.join(BASE, 'ckpts')
 
     os.makedirs(log_dir, exist_ok=True)
     os.makedirs(ckpt_path, exist_ok=True)

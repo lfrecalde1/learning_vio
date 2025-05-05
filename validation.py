@@ -35,7 +35,9 @@ model = PoseNet(
     num_layers=2
 ).to(DEVICE)
 
-ckpt_path = '/home/fer/Lectures/computer_vision/Learning_vio/ckpts/best_model.pth'
+BASE = os.getcwd()
+ckpt_path = os.path.join(BASE, 'ckpts/best_model.pth')
+print(ckpt_path)
 model.load_state_dict(torch.load(ckpt_path))
 model.eval()
 
